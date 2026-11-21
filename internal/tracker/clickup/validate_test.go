@@ -62,7 +62,7 @@ func TestValidateConfig(t *testing.T) {
 					t.Errorf("diagnostic %q leaks the api_key", d.Message)
 				}
 			}
-			if !slices.Equal(got, tt.want) && !(len(got) == 0 && len(tt.want) == 0) {
+			if !slices.Equal(got, tt.want) { // nil and empty compare equal
 				t.Errorf("checks = %v, want %v", got, tt.want)
 			}
 		})

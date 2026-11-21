@@ -3,6 +3,7 @@ package clickup
 import (
 	"encoding/json"
 	"fmt"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"slices"
@@ -364,9 +365,7 @@ func newTestAdapter(t *testing.T, srv *httptest.Server, extra map[string]any) *C
 		"active_states":   []any{"to do", "in progress"},
 		"terminal_states": []any{"complete"},
 	}
-	for k, v := range extra {
-		cfg[k] = v
-	}
+	maps.Copy(cfg, extra)
 	adapter, err := NewClickUpAdapter(cfg)
 	if err != nil {
 		t.Fatalf("NewClickUpAdapter: %v", err)

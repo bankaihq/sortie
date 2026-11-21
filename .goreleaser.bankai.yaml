@@ -1,0 +1,101 @@
+# yaml-language-server: $schema=https://goreleaser.com/static/schema.json
+#
+# Release config for the bankaihq/sortie fork, used by
+# .github/workflows/release-bankai.yml. Upstream's .goreleaser.yaml stays
+# untouched so upstream merges don't conflict. Differences from it: releases
+# go to bankaihq/sortie, there is no Windows signing and no Homebrew cask, the
+# platforms are the four the fork ships, and -bankai.N versions are normal
+# releases rather than pre-releases.
+version: 2
+
+project_name: sortie
+report_sizes: true
+
+before:
+  hooks:
+    - go mod verify
+    - >-
+      go run github.com/tc-hib/go-winres@v0.3.3 simply
+      --arch amd64,arm64
+      --out cmd/sortie/rsrc
+      --manifest none
+      --product-name Sortie
+      --file-description Sortie
+      --original-filename sortie.exe
+      --product-version {{ .Version }}
+      --file-version {{ .Version }}
+
+builds:
+  - id: sortie
+    main: ./cmd/sortie
+    binary: sortie
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    ignore:
+      - goos: darwin
+        goarch: amd64
+      - goos: windows
+        goarch: arm64
+    ldflags:
+      - >-
+        -s -w
+        -X main.Version={{ .Version }}
+        -X main.Commit={{ .FullCommit }}
+        -X main.Date={{ .CommitDate }}
+    flags:
+      - -trimpath
+    tags:
+      - osusergo
+      - netgo
+    mod_timestamp: "{{ .CommitTimestamp }}"
+
+archives:
+  - id: default
+    formats:
+      - tar.gz
+    format_overrides:
+      - goos: windows
+        formats:
+          - zip
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    files:
+      - LICENSE*
+      - README*
+      - NOTICE*
+      - CHANGELOG.bankai.md
+
+checksum:
+  name_template: "checksums.txt"
+  algorithm: sha256
+
+sboms:
+  - artifacts: archive
+
+release:
+  github:
+    owner: bankaihq
+    name: sortie
+  name_template: "{{ .ProjectName }} {{ .Version }}"
+  footer: |
+    ---
+
+    **Based on upstream**: [v{{ .Env.BASE_VERSION }}](https://github.com/sortie-ai/sortie/releases/tag/v{{ .Env.BASE_VERSION }})
+
+    **Fork changes**: https://github.com/bankaihq/sortie/compare/v{{ .Env.BASE_VERSION }}...{{ .Tag }}
+
+    Binaries are not code-signed. Verify a download with `checksums.txt` and `gh attestation verify <file> --repo bankaihq/sortie`.
+  draft: false
+  # prerelease is left unset (false): upstream's "auto" would mark every
+  # -bankai.N version as a pre-release.
+  make_latest: true
+  mode: keep-existing
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-SNAPSHOT-{{ .ShortCommit }}"

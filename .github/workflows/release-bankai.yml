@@ -1,0 +1,415 @@
+# yaml-language-server: $schema=https://www.schemastore.org/github-workflow.json
+#
+# Release workflow for the bankaihq/sortie fork. Upstream's release.yml stays
+# untouched (and disabled in the fork) so upstream merges don't conflict.
+# See RELEASING.bankai.md for the process around it.
+name: Release (Bankai)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version, X.Y.Z-bankai.N where vX.Y.Z is the upstream release the bankai branch is on"
+        required: true
+        type: string
+      dry_run:
+        description: "Dry run - run all steps but skip tag push, release publish and image push"
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-bankai
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    name: Validate inputs
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.normalize.outputs.version }}
+      tag: ${{ steps.normalize.outputs.tag }}
+      base: ${{ steps.normalize.outputs.base }}
+    steps:
+      - name: Check branch
+        if: ${{ github.ref != 'refs/heads/bankai' }}
+        run: |
+          echo "::error::Fork releases are cut from the bankai branch, not ${GITHUB_REF}."
+          exit 1
+
+      - name: Validate version
+        id: normalize
+        env:
+          INPUT: ${{ inputs.version }}
+        run: |
+          VERSION="${INPUT#[vV]}"
+          if [[ ! "$VERSION" =~ ^([0-9]+\.[0-9]+\.[0-9]+)-bankai\.[1-9][0-9]*$ ]]; then
+            echo "::error::Invalid version '${INPUT}'. Expected X.Y.Z-bankai.N, e.g. 1.32.0-bankai.1."
+            exit 1
+          fi
+          {
+            echo "version=${VERSION}"
+            echo "tag=v${VERSION}"
+            echo "base=${BASH_REMATCH[1]}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify new tag
+        env:
+          TAG: ${{ steps.normalize.outputs.tag }}
+        run: |
+          if git rev-parse -q --verify "refs/tags/${TAG}" >/dev/null; then
+            echo "::error::Tag ${TAG} already exists. Choose the next -bankai.N."
+            exit 1
+          fi
+          echo "✓ Tag ${TAG} is available"
+
+      - name: Verify upstream base
+        env:
+          BASE: ${{ steps.normalize.outputs.base }}
+        run: |
+          if ! git rev-parse -q --verify "refs/tags/v${BASE}" >/dev/null; then
+            echo "::error::Upstream tag v${BASE} is not in this repository. Push it first: git push origin v${BASE}"
+            exit 1
+          fi
+          newest="$(git describe --tags --abbrev=0 --match 'v[0-9]*.[0-9]*.[0-9]*' --exclude '*-*' HEAD)"
+          if [ "$newest" != "v${BASE}" ]; then
+            echo "::error::The bankai branch is on upstream ${newest}, not v${BASE}. Release it as ${newest#v}-bankai.N."
+            exit 1
+          fi
+          echo "✓ bankai is on upstream v${BASE}"
+
+      - name: Extract release notes
+        env:
+          VERSION: ${{ steps.normalize.outputs.version }}
+        run: |
+          awk -v v="$VERSION" '
+            index($0, "## [" v "]") == 1 { found = 1; next }
+            found && /^## \[/ { exit }
+            found { print }
+          ' CHANGELOG.bankai.md > "${RUNNER_TEMP}/notes.md"
+          if ! grep -q '[^[:space:]]' "${RUNNER_TEMP}/notes.md"; then
+            echo "::error::CHANGELOG.bankai.md has no entry for ${VERSION}. Add a '## [${VERSION}] - YYYY-MM-DD' section with the fork's changes."
+            exit 1
+          fi
+          echo "✓ CHANGELOG.bankai.md contains [${VERSION}]"
+
+      - name: Upload release notes
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-notes
+          path: ${{ runner.temp }}/notes.md
+          if-no-files-found: error
+          retention-days: 1
+
+  lint:
+    name: Lint (${{ matrix.goos }})
+    needs: [validate]
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        goos: [linux, darwin, windows]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+
+      - name: Run linter
+        uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
+        env:
+          GOOS: ${{ matrix.goos }}
+        with:
+          version: latest
+          skip-cache: true
+
+  test-unit:
+    name: Unit tests
+    needs: [validate]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+
+      - name: Run unit tests
+        run: go test -race -count=1 ./...
+
+  test-integration-gitea:
+    name: "Integration: Gitea"
+    needs: [lint, test-unit]
+    runs-on: ubuntu-latest
+    env:
+      SORTIE_GITEA_TEST: "1"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+
+      - name: Provision Gitea
+        run: scripts/gitea-integration-provision.sh
+
+      - name: Run integration tests
+        run: go test -race -count=1 -v -run 'Integration' ./internal/scm/gitea/...
+
+  test-integration-gitlab:
+    name: "Integration: GitLab"
+    needs: [lint, test-unit]
+    runs-on: ubuntu-latest
+    env:
+      SORTIE_GITLAB_TEST: "1"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+
+      - name: Provision GitLab
+        run: scripts/gitlab-integration-provision.sh
+
+      - name: Run integration tests
+        run: go test -race -count=1 -v -run 'Integration' ./internal/scm/gitlab/...
+
+  test-integration-clickup:
+    name: "Integration: ClickUp"
+    needs: [lint, test-unit]
+    runs-on: ubuntu-latest
+    env:
+      SORTIE_CLICKUP_TEST: "1"
+      SORTIE_CLICKUP_API_KEY: ${{ secrets.SORTIE_CLICKUP_API_KEY }}
+      SORTIE_CLICKUP_LIST: ${{ vars.SORTIE_CLICKUP_LIST }}
+      SORTIE_CLICKUP_ACTIVE_STATES: ${{ vars.SORTIE_CLICKUP_ACTIVE_STATES }}
+      SORTIE_CLICKUP_TEAM_ID: ${{ vars.SORTIE_CLICKUP_TEAM_ID }}
+      SORTIE_CLICKUP_WRITE_TASK: ${{ vars.SORTIE_CLICKUP_WRITE_TASK }}
+    steps:
+      - name: Verify ClickUp config
+        run: |
+          missing=()
+          [ -z "$SORTIE_CLICKUP_API_KEY" ]    && missing+=("SORTIE_CLICKUP_API_KEY (secret)")
+          [ -z "$SORTIE_CLICKUP_LIST" ]       && missing+=("SORTIE_CLICKUP_LIST (variable)")
+          [ -z "$SORTIE_CLICKUP_WRITE_TASK" ] && missing+=("SORTIE_CLICKUP_WRITE_TASK (variable)")
+          if [ ${#missing[@]} -ne 0 ]; then
+            echo "::error::Missing ClickUp test config: ${missing[*]}"
+            echo "Configure these in Settings → Secrets and variables → Actions (see RELEASING.bankai.md)"
+            exit 1
+          fi
+          echo "✓ ClickUp test configuration is present"
+
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+
+      - name: Run integration tests
+        run: go test -race -count=1 -v -run 'Integration' ./internal/tracker/clickup/...
+
+  release:
+    name: Tag & Release
+    needs:
+      - validate
+      - lint
+      - test-unit
+      - test-integration-gitea
+      - test-integration-gitlab
+      - test-integration-clickup
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: true
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+
+      - name: Install Syft
+        uses: anchore/sbom-action/download-syft@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3
+
+      - name: Download release notes
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release-notes
+          path: ${{ runner.temp }}
+
+      - name: Create tag
+        env:
+          TAG: ${{ needs.validate.outputs.tag }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          if [ "$DRY_RUN" = "true" ]; then msg="Dry run ${TAG}"; else msg="Release ${TAG}"; fi
+          git tag -a "$TAG" -m "$msg"
+
+      - name: Push tag
+        if: ${{ !inputs.dry_run }}
+        env:
+          TAG: ${{ needs.validate.outputs.tag }}
+        run: |
+          git push origin "$TAG"
+          echo "### Tagged \`${TAG}\`" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Run GoReleaser
+        uses: goreleaser/goreleaser-action@a4f02ab5355a589de60d917a659ce617ed19b3de # v7.3.0
+        with:
+          distribution: goreleaser
+          version: "~> v2"
+          args: release --clean --config .goreleaser.bankai.yaml --release-notes ${{ runner.temp }}/notes.md ${{ inputs.dry_run && '--skip=publish --skip=announce' || '' }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GORELEASER_CURRENT_TAG: ${{ needs.validate.outputs.tag }}
+          BASE_VERSION: ${{ needs.validate.outputs.base }}
+
+      - name: Attest release artifacts
+        if: ${{ !inputs.dry_run }}
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: |
+            dist/*.tar.gz
+            dist/*.zip
+            dist/checksums.txt
+
+      - name: Release summary
+        env:
+          TAG: ${{ needs.validate.outputs.tag }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          if [ "$DRY_RUN" = "true" ]; then
+            echo "### Dry run complete for ${TAG}" >> "$GITHUB_STEP_SUMMARY"
+            echo "No tag was pushed and no release was published." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "### Release ${TAG} published" >> "$GITHUB_STEP_SUMMARY"
+          fi
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "**Artifacts:**" >> "$GITHUB_STEP_SUMMARY"
+          (cd dist && ls -1 ./*.tar.gz ./*.zip checksums.txt ./*.sbom.json 2>/dev/null | sed 's|^\./||; s|.*|- `&`|') >> "$GITHUB_STEP_SUMMARY"
+
+  docker:
+    name: Docker image
+    needs: [validate, release]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set build date
+        run: echo "BUILD_DATE=$(date -u +%Y-%m-%d)" >> "$GITHUB_ENV"
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: Log into GHCR
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Servers pin exact versions, so the image gets only its version tag:
+      # no latest, no moving major or minor tags.
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        with:
+          images: ghcr.io/${{ github.repository }}
+          flavor: |
+            latest=false
+          tags: |
+            type=raw,value=${{ needs.validate.outputs.version }}
+
+      - name: Build and push
+        id: build
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: ${{ !inputs.dry_run }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          annotations: ${{ steps.meta.outputs.annotations }}
+          build-args: |
+            VERSION=${{ needs.validate.outputs.version }}
+            REVISION=${{ github.sha }}
+            BUILD_DATE=${{ env.BUILD_DATE }}
+          provenance: mode=max
+          sbom: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Generate artifact attestation
+        if: ${{ !inputs.dry_run }}
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-name: ghcr.io/${{ github.repository }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
+
+      - name: Docker summary
+        env:
+          DRY_RUN: ${{ inputs.dry_run }}
+          TAGS: ${{ steps.meta.outputs.tags }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          echo "### Docker image" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          if [ "$DRY_RUN" = "true" ]; then
+            echo "Multi-platform image built but **not pushed** (dry run)." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "Published \`${TAGS}\` for linux/amd64 and linux/arm64." >> "$GITHUB_STEP_SUMMARY"
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "**Digest:** \`${DIGEST}\`" >> "$GITHUB_STEP_SUMMARY"
+          fi

@@ -20,6 +20,7 @@ import (
 	_ "github.com/sortie-ai/sortie/internal/scm/gitea"
 	_ "github.com/sortie-ai/sortie/internal/scm/github"
 	_ "github.com/sortie-ai/sortie/internal/scm/gitlab"
+	_ "github.com/sortie-ai/sortie/internal/tracker/clickup"
 	_ "github.com/sortie-ai/sortie/internal/tracker/file"
 	_ "github.com/sortie-ai/sortie/internal/tracker/jira"
 	_ "github.com/sortie-ai/sortie/internal/tracker/linear"
@@ -151,6 +152,12 @@ func TestAdapterMeta_RealRegistrations(t *testing.T) {
 				wantAPIKey:         true,
 				wantProject:        true,
 				wantTerminalStates: true,
+			},
+			{
+				name:        "clickup requires api_key and project",
+				kind:        "clickup",
+				wantAPIKey:  true,
+				wantProject: true,
 			},
 			{
 				name:        "linear requires api_key and project",

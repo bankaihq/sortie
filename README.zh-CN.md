@@ -30,7 +30,7 @@ Sortie 就是这套基础设施。
 
 ## 支持的工具
 
-**工单系统：** GitHub Issues、GitLab Issues、Gitea Issues、Linear 和 Jira。
+**工单系统：** GitHub Issues、GitLab Issues、Gitea Issues、Linear、Jira 和 ClickUp。
 
 **编程智能体：** Claude Code、Copilot、OpenCode、Codex、Kiro 和 Gemini。
 

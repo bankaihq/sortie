@@ -21,6 +21,7 @@ These pages are for working on Sortie itself. To install, configure, and run Sor
   - **Tracker and SCM adapters**
     - [Jira](jira-adapter-notes.md) - tracker decisions and failure modes
     - [Linear](linear-adapter-notes.md) - GraphQL costs and model mismatches
+    - [ClickUp](clickup-adapter-notes.md) - list scoping, per-task reads, and dependencies as blockers
     - [GitHub](github-adapter-notes.md) - SCM design decisions and traps
     - [GitLab](gitlab-adapter-notes.md) - SCM design decisions and traps
     - [Gitea](gitea-adapter-notes.md) - SCM design decisions and traps
